@@ -1,0 +1,221 @@
+---
+title: "statistical analysis"
+author: "Mingjia"
+date: "5/14/2020"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(car)
+library(rstatix)
+library(tidyverse)
+contrast.default = options("contrasts")
+options(contrasts = c("contr.helmert", "contr.poly"))
+```
+
+
+# median split based on training accuracy
+```{r}
+# select certain proportion of subjects for each subject
+ID_outliers = read.csv("accuracy_train.csv") %>%
+              select(!X) %>%
+              filter(block %in% c(8,9,10)) %>%
+              group_by(condition,ID) %>%
+              summarize(PrCorr_sub = mean(Pr_corr_sub)) %>%
+              group_by(condition) %>%
+              mutate(outlier_TF = cume_dist(PrCorr_sub) >= .5)
+
+ID_top50 = with(ID_outliers,ID[outlier_TF == TRUE])     
+ID_low50 = with(ID_outliers,ID[outlier_TF == FALSE])   
+length(unique(ID_top50))
+length(unique(ID_low50))
+```
+
+
+# classification learning
+```{r}
+# 4 x 10 ANOVA : condition x block
+PrCorr_mean_train = read.csv("accuracy_train.csv") %>%
+                    # filter(ID %in% ID_top50) %>%
+                    select(!X)
+             
+PrCorr_mean_train$condition = factor(PrCorr_mean_train$condition,
+                               labels = c("low","med","high","mixed"))
+PrCorr_mean_train$block = factor(PrCorr_mean_train$block)
+
+## run ANOVA
+res.aov <- anova_test(Pr_corr_sub ~ condition * block + Error(ID/block),
+                      data= PrCorr_mean_train,
+                      type=3,effect.size = "pes",detailed=T)
+get_anova_table(res.aov,correction = "auto")
+
+## compare terminal accuracy
+  PrCorr_mean_train %>%
+  filter(block %in% c(8,9,10)) %>%
+  group_by(condition,ID) %>%
+  summarize(Pr_corr_last3 = mean(Pr_corr_sub)) %>%
+  ungroup() %>%
+  t_test(Pr_corr_last3 ~ condition, paired = FALSE,
+         comparisons = list(c("low","med"),c("med","high"),c("med","mixed")),
+         p.adjust.method = "none",detailed = TRUE)
+```
+
+# outlier exclusion based on test accuracy
+
+```{r}
+N_subj = read.csv("accuracy_test.csv") %>%
+         select(!X) %>%
+         filter(!ID %in% ID_outliers) %>%
+         group_by(condition) %>%
+         summarize(Nsubj_cond = n_distinct(ID)) %>%
+         mutate(Nsubj = sum(Nsubj_cond)) %>%
+         View()
+         
+
+# select certain proportion of subjects for each subject
+ID_outliers = read.csv("accuracy_test.csv") %>%
+              select(!X) %>%
+              filter(itemtype != 1) %>%
+              group_by(condition,ID) %>%
+              summarize(PrCorr_sub = mean(PrCorr)) %>%
+              group_by(condition) %>%
+              mutate(outlier_TF = cume_dist(PrCorr_sub) <= .1)
+
+ID_outliers = with(ID_outliers,ID[outlier_TF == TRUE])     
+length(unique(ID_outliers))
+
+read.csv("accuracy_test.csv") %>%
+select(!X) %>%
+filter(!ID %in% ID_outliers) %>%
+group_by(condition,itemtype) %>%
+summarize(PrCorr = mean(PrCorr)) %>%
+spread(itemtype,PrCorr) %>%
+write.csv(file = "PrCorr_obs_high90.csv")
+```
+
+# classification test
+
+```{r}
+# 4 x 4 ANOVA : condition x item type
+## subset item type variable
+PrCorr_mean_test = read.csv("accuracy_test.csv") %>%
+                   select(!X) 
+                   # filter(!ID %in% ID_outliers)
+             
+PrCorr_mean_test$condition = factor(PrCorr_mean_test$condition,
+                               labels = c("low","med","high","mixed"))
+PrCorr_mean_test$itemtype = factor(PrCorr_mean_test$itemtype,
+                            labels=c("old","proto","newlow","newmed","newhigh"))
+
+## run ANOVA
+res.aov <- anova_test(PrCorr ~ condition * itemtype + Error(ID/itemtype),
+                      data= filter(PrCorr_mean_test,itemtype != "old"),#only focus on novel patterns
+                      type=3, effect.size = "pes",
+                      detailed=T)
+# res.aov <- aov(PrCorr ~ condition * itemtype + Error(ID/itemtype),
+#                       data= filter(PrCorr_mean_test,itemtype != "old"))
+get_anova_table(res.aov,correction = "auto")
+
+
+```
+
+```{r}
+
+
+# ANOVA for old and corresponding new items for each condition
+itemtype_labels <- c("old","proto","newlow","newmed","newhigh")
+condition_labels <- c("low","med","high","mixed")
+
+PrCorr_mean_OldNew = read.csv("accuracy_test.csv") %>%
+                     select(!X) %>%
+                     mutate(itemtype = factor(itemtype, labels = itemtype_labels,ordered = T),
+                            condition = factor(condition, labels = condition_labels,ordered = T)) %>%
+                     mutate(OldNew = case_when(
+                       condition == "low" & itemtype == "newlow" ~ "new",
+                       condition == "med" & itemtype == "newmed" ~ "new",
+                       condition == "high" & itemtype == "newhigh" ~ "new",
+                       condition == "mixed" & grepl("new",itemtype) ~ "new",
+                       itemtype == "old" ~ "old")) %>%
+                       group_by(condition,ID,OldNew) %>%
+                       summarize(PrCorr = mean(PrCorr)) %>%
+                       filter(OldNew %in% c("old","new")) %>%
+                       ungroup()
+
+
+# PrCorr_mean_OldNew %>%
+#   pivot_wider(names_from = OldNew, values_from = PrCorr) %>%
+#   write.csv(file = "ANOVA data.csv")
+
+## run ANOVA
+res.aov <- anova_test(PrCorr ~ condition * OldNew + Error(ID/OldNew),
+                      data = PrCorr_mean_OldNew,
+                      type = 3, effect.size = "pes",
+                      detailed = T)
+get_anova_table(res.aov,correction = "GG")
+
+
+
+# PrCorr_mean_test %>%
+# filter(condition == "low") %>%
+# pairwise_t_test(PrCorr ~ itemtype, paired = TRUE,
+#                 comparisons = list(c("old","newlow")),
+#                 p.adjust.method = "bonferroni")
+# 
+# PrCorr_mean_test %>%
+# filter(condition == "med") %>%
+# pairwise_t_test(PrCorr ~ itemtype, paired = TRUE,
+#                 comparisons = list(c("old","newmed")),
+#                 p.adjust.method = "bonferroni")
+# 
+# PrCorr_mean_test %>%
+# filter(condition == "high") %>%
+# pairwise_t_test(PrCorr ~ itemtype, paired = TRUE,
+#                 comparisons = list(c("old","newhigh")),
+#                 p.adjust.method = "bonferroni")
+```
+
+```{r}
+
+# planned contrast between high distortion items between conditions
+PrCorr_mean_test %>%
+filter(itemtype == "newhigh") %>%
+t_test(PrCorr ~ condition, paired = FALSE,var.equal = T,
+       comparisons = list(c("high","med"),c("high","mixed"),c("high","low")),
+       p.adjust.method = "bonferroni",detailed = TRUE)
+
+PrCorr_mean_test %>%
+filter(itemtype == "newmed") %>%
+t_test(PrCorr ~ condition, paired = FALSE,var.equal = T,
+       comparisons = list(c("med","low")),
+       p.adjust.method = "bonferroni",detailed = TRUE)
+
+
+# # correlation tests of typicality effect for each condition
+# PrCorr_mean_test %>% 
+# filter(itemtype != "old") %>%
+# mutate(itemtype = as.numeric(itemtype)) %>%
+# group_by(condition) %>%
+# cor_test(itemtype,PrCorr)
+# 
+# 
+# # planned contrast of typicality gradient between conditions
+# PrCorr_mean_test %>%
+# filter(itemtype != "old") %>%
+# group_by(ID,condition) %>%
+# summarize(gradient = lm(PrCorr ~ as.numeric(itemtype))[["coefficients"]][2]) %>%
+# ungroup() %>%
+# t_test(gradient ~ condition, paired = FALSE,
+#             comparisons = list(c("low","med"),c("med","high"),c("med","mixed")),
+#             p.adjust.method = "none")#"bonferroni"
+# 
+# PrCorr_mean_test %>%
+# filter(itemtype != "old") %>%
+# group_by(ID,condition) %>%
+# summarize(gradient = lm(PrCorr ~ as.numeric(itemtype))[["coefficients"]][2]) %>%
+# group_by(condition) %>%
+# summarize(graident_mean = mean(gradient))
+
+```
